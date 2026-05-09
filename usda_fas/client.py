@@ -26,7 +26,8 @@ class USDAFASClient:
         Args:
             api_key (str, optional): The API key. If not provided, looks for USDA_FAS_API_KEY env var.
             timeout (int, optional): Request timeout in seconds.
-            base_url (str, optional): Override the default API host.
+            base_url (str, optional): Override the default API host. Treat this as trusted input because
+                the configured API key will be sent to that host in the X-Api-Key header.
         """
         self.api_key = api_key or os.getenv("USDA_FAS_API_KEY")
         self.timeout = timeout

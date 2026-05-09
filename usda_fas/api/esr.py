@@ -11,6 +11,16 @@ class ESRClient(USDAFASClient):
     Client for the Export Sales Reporting (ESR) API.
     """
 
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        timeout: int = 30,
+        base_url: Optional[str] = None,
+    ):
+        super().__init__(api_key=api_key, timeout=timeout, base_url=base_url)
+        self._esr_data_release_dates_cache: Optional[List[Dict[str, Any]]] = None
+        self._esr_exports_cache: Dict[tuple[int, int, Optional[int]], List[Dict[str, Any]]] = {}
+
     @staticmethod
     def _normalize_date_value(value: DateInput) -> str:
         """
@@ -23,7 +33,7 @@ class ESRClient(USDAFASClient):
             return value.isoformat()
 
         if isinstance(value, str):
-            return value.split("T", 1)[0]
+            return value.split("T", 1)[0].split(" ", 1)[0]
 
         raise TypeError("week_ending_date must be a str, date, or datetime")
 
@@ -34,6 +44,16 @@ class ESRClient(USDAFASClient):
             return None
 
         return cls._normalize_date_value(week_ending_date)
+
+    @classmethod
+    def _group_records_by_week_ending_date(cls, records: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        grouped_records: Dict[str, List[Dict[str, Any]]] = {}
+        for record in records:
+            week_ending_date = cls._extract_week_ending_date(record)
+            if week_ending_date:
+                grouped_records.setdefault(week_ending_date, []).append(record)
+
+        return grouped_records
 
     def get_esr_regions(self) -> List[Dict[str, Any]]:
         """
@@ -63,7 +83,10 @@ class ESRClient(USDAFASClient):
         """
         Returns a set of records with the date of the last release of ESR Commodity Export Data.
         """
-        return self._make_request("GET", "/api/esr/datareleasedates")
+        if self._esr_data_release_dates_cache is None:
+            self._esr_data_release_dates_cache = self._make_request("GET", "/api/esr/datareleasedates")
+
+        return self._esr_data_release_dates_cache
 
     def get_esr_release_info(self, commodity_code: int) -> Optional[Dict[str, Any]]:
         """
@@ -83,7 +106,8 @@ class ESRClient(USDAFASClient):
         if not release_info:
             return None
 
-        return release_info.get("marketYear")
+        market_year = release_info.get("marketYear")
+        return int(market_year) if market_year is not None else None
 
     def get_esr_exports_all_countries(self, commodity_code: int, market_year: int) -> List[Dict[str, Any]]:
         """
@@ -93,8 +117,12 @@ class ESRClient(USDAFASClient):
             commodity_code (int): Commodity Code (e.g., 104 for Wheat - White).
             market_year (int): Market Year (e.g., 2017).
         """
-        endpoint = f"/api/esr/exports/commodityCode/{commodity_code}/allCountries/marketYear/{market_year}"
-        return self._make_request("GET", endpoint)
+        cache_key = (int(commodity_code), int(market_year), None)
+        if cache_key not in self._esr_exports_cache:
+            endpoint = f"/api/esr/exports/commodityCode/{commodity_code}/allCountries/marketYear/{market_year}"
+            self._esr_exports_cache[cache_key] = self._make_request("GET", endpoint)
+
+        return self._esr_exports_cache[cache_key]
 
     def get_esr_exports_by_country(self, commodity_code: int, country_code: int, market_year: int) -> List[Dict[str, Any]]:
         """
@@ -105,8 +133,12 @@ class ESRClient(USDAFASClient):
             country_code (int): Country Code (e.g., 1220 for Canada).
             market_year (int): Market Year.
         """
-        endpoint = f"/api/esr/exports/commodityCode/{commodity_code}/countryCode/{country_code}/marketYear/{market_year}"
-        return self._make_request("GET", endpoint)
+        cache_key = (int(commodity_code), int(market_year), int(country_code))
+        if cache_key not in self._esr_exports_cache:
+            endpoint = f"/api/esr/exports/commodityCode/{commodity_code}/countryCode/{country_code}/marketYear/{market_year}"
+            self._esr_exports_cache[cache_key] = self._make_request("GET", endpoint)
+
+        return self._esr_exports_cache[cache_key]
 
     def get_esr_exports(
         self,
@@ -132,6 +164,7 @@ class ESRClient(USDAFASClient):
         Return the latest available week ending date for a commodity.
 
         If market_year is omitted, the latest market year from the release metadata is used.
+        If country_code is provided, returns the latest week available for that country.
         """
         if market_year is None:
             market_year = self.get_esr_latest_market_year(commodity_code)
@@ -140,15 +173,11 @@ class ESRClient(USDAFASClient):
             return None
 
         records = self.get_esr_exports(commodity_code, market_year, country_code=country_code)
-        week_ending_dates = [
-            week_ending_date
-            for week_ending_date in (self._extract_week_ending_date(record) for record in records)
-            if week_ending_date
-        ]
-        if not week_ending_dates:
+        grouped_records = self._group_records_by_week_ending_date(records)
+        if not grouped_records:
             return None
 
-        return max(week_ending_dates)
+        return max(grouped_records)
 
     def get_esr_exports_for_week(
         self,
@@ -170,12 +199,8 @@ class ESRClient(USDAFASClient):
 
         target_week = self._normalize_date_value(week_ending_date)
         records = self.get_esr_exports(commodity_code, market_year, country_code=country_code)
-
-        return [
-            record
-            for record in records
-            if self._extract_week_ending_date(record) == target_week
-        ]
+        grouped_records = self._group_records_by_week_ending_date(records)
+        return grouped_records.get(target_week, [])
 
     def get_esr_latest_week_exports(
         self,
@@ -195,18 +220,8 @@ class ESRClient(USDAFASClient):
             return []
 
         records = self.get_esr_exports(commodity_code, market_year, country_code=country_code)
-        latest_week = None
-
-        for record in records:
-            week_ending_date = self._extract_week_ending_date(record)
-            if week_ending_date and (latest_week is None or week_ending_date > latest_week):
-                latest_week = week_ending_date
-
-        if latest_week is None:
+        grouped_records = self._group_records_by_week_ending_date(records)
+        if not grouped_records:
             return []
 
-        return [
-            record
-            for record in records
-            if self._extract_week_ending_date(record) == latest_week
-        ]
+        return grouped_records[max(grouped_records)]

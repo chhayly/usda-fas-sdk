@@ -16,6 +16,7 @@ This library provides easy access to vast agricultural data sets including Expor
 - **Auth Handling**: Seamless integration with USDA FAS API keys.
 - **Easy Mode**: `USDAFASEasyClient` automatically normalizes data, replacing numeric codes (e.g., `CountryCode: 2010`) with readable names and descriptions (e.g., `Name: Mexico`, `Genc: MEX`).
 - **Weekly ESR Helpers**: Convenience methods for latest market year, latest week ending date, exact week filters, and normalized weekly export-sales pulls.
+- **Client-Instance ESR Caching**: Release metadata and yearly ESR export payloads are cached per client instance to avoid redundant repeat fetches.
 - **Core Endpoint Coverage**: Wrappers for the main ESR, GATS, and PSD REST endpoints used in the USDA FAS Open Data API.
 - **Type Hints**: Fully typed for better IDE support.
 
@@ -52,8 +53,8 @@ import json
 # Automatically loads USDA_FAS_API_KEY from environment or .env
 client = USDAFASEasyClient()
 
-# Example: Pull the latest weekly export-sales records for Corn (Code 401)
-data = client.get_esr_latest_week_exports_normalized(commodity_code=401)
+# Example: Pull the latest weekly export-sales records for Corn (Code 401) to Canada (Code 1220)
+data = client.get_esr_latest_week_exports_normalized(commodity_code=401, country_code=1220)
 
 if data:
     # Print the first enriched record from the latest week
@@ -125,15 +126,28 @@ from usda_fas import ESRClient
 esr = ESRClient()
 
 latest_market_year = esr.get_esr_latest_market_year(401)
-latest_week = esr.get_esr_latest_week_ending_date(401, market_year=latest_market_year)
-latest_rows = esr.get_esr_latest_week_exports(401, market_year=latest_market_year)
-canada_rows = esr.get_esr_exports_for_week(
-    commodity_code=401,
-    week_ending_date=latest_week,
-    market_year=latest_market_year,
-    country_code=1220,
+records = esr.get_esr_exports_all_countries(401, latest_market_year)
+
+latest_week = max(
+    record["weekEndingDate"].split("T", 1)[0]
+    for record in records
+    if record.get("weekEndingDate")
 )
+
+latest_rows = [
+    record
+    for record in records
+    if str(record.get("weekEndingDate", "")).startswith(latest_week)
+]
+
+canada_rows = [
+    record
+    for record in latest_rows
+    if str(record.get("countryCode")) == "1220"
+]
 ```
+
+If you prefer the weekly helper methods, repeated `datareleasedates` and yearly ESR export calls are also cached per client instance.
 
 ### Client Configuration
 You can optionally override the request timeout or API host:
