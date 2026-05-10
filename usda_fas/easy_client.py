@@ -1,7 +1,12 @@
-from typing import List, Dict, Any, Optional
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Union
+
 from .api.esr import ESRClient
 from .api.gats import GATSClient
 from .api.psd import PSDClient
+
+DateInput = Union[str, date, datetime]
+
 
 class USDAFASEasyClient(ESRClient, GATSClient, PSDClient):
     """
@@ -9,11 +14,16 @@ class USDAFASEasyClient(ESRClient, GATSClient, PSDClient):
     Provides 'easy query' methods to automatically join and normalize data.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
-        super().__init__(api_key)
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        timeout: int = 30,
+        base_url: Optional[str] = None,
+    ):
+        super().__init__(api_key=api_key, timeout=timeout, base_url=base_url)
         # Caches for reference data
-        self._esr_countries_map = None # Maps countryCode -> full country record
-        self._esr_regions_map = None   # Maps regionId -> regionName
+        self._esr_countries_map = None  # Maps countryCode -> full country record
+        self._esr_regions_map = None  # Maps regionId -> regionName
         self._esr_commodities_map = None
         self._esr_units_map = None
         self._psd_countries_map = None
@@ -30,15 +40,15 @@ class USDAFASEasyClient(ESRClient, GATSClient, PSDClient):
         if not self._esr_countries_map:
             countries = self.get_esr_countries()
             # Cache the whole record so we can access description, genc, regionId
-            self._esr_countries_map = {str(c.get('countryCode')): c for c in countries}
-        
+            self._esr_countries_map = {str(c.get("countryCode")): c for c in countries}
+
         if not self._esr_commodities_map:
             commodities = self.get_esr_commodities()
-            self._esr_commodities_map = {str(c.get('commodityCode')): c.get('commodityName') for c in commodities}
+            self._esr_commodities_map = {str(c.get("commodityCode")): c.get("commodityName") for c in commodities}
 
         if not self._esr_units_map:
             units = self.get_esr_units_of_measure()
-            self._esr_units_map = {str(u.get('unitId')): u.get('unitNames') for u in units}
+            self._esr_units_map = {str(u.get("unitId")): u.get("unitNames") for u in units}
 
     def _ensure_psd_ref_data(self):
         """Lazy load PSD reference data."""
@@ -48,53 +58,105 @@ class USDAFASEasyClient(ESRClient, GATSClient, PSDClient):
 
         if not self._psd_commodities_map:
             commodities = self.get_psd_commodities()
-            self._psd_commodities_map = {str(c.get('commodityCode')): c.get('commodityName') for c in commodities}
-        
+            self._psd_commodities_map = {str(c.get("commodityCode")): c.get("commodityName") for c in commodities}
+
         if not self._psd_units_map:
             units = self.get_psd_units_of_measure()
-            self._psd_units_map = {str(u.get('unitId')): u.get('unitDescription') for u in units}
-        
+            self._psd_units_map = {str(u.get("unitId")): u.get("unitDescription") for u in units}
+
         if not self._psd_attributes_map:
             attrs = self.get_psd_commodity_attributes()
-            self._psd_attributes_map = {str(a.get('attributeId')): a.get('attributeName') for a in attrs}
+            self._psd_attributes_map = {str(a.get("attributeId")): a.get("attributeName") for a in attrs}
+
+    def _normalize_esr_records(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Enrich ESR records with Country, Commodity, Unit, and Region names.
+        """
+        self._ensure_esr_ref_data()
+
+        normalized_data = []
+        for record in data:
+            new_record = record.copy()
+            # Enrich with names
+            c_code = str(record.get("countryCode", ""))
+            com_code = str(record.get("commodityCode", ""))
+            unit_id = str(record.get("unitId", ""))
+
+            if c_code in self._esr_countries_map:
+                country_data = self._esr_countries_map[c_code]
+                new_record["countryName"] = country_data.get("countryName")
+                new_record["countryDescription"] = country_data.get("countryDescription")
+                new_record["gencCode"] = country_data.get("gencCode")
+
+                # Enrich Region Name using regionId from country data
+                region_id = str(country_data.get("regionId", ""))
+                if region_id in self._esr_regions_map:
+                    new_record["regionName"] = self._esr_regions_map[region_id]
+                else:
+                    new_record["regionName"] = None
+
+            if com_code in self._esr_commodities_map:
+                new_record["commodityName"] = self._esr_commodities_map[com_code]
+            if unit_id in self._esr_units_map:
+                new_record["unitName"] = self._esr_units_map[unit_id]
+
+            normalized_data.append(new_record)
+
+        return normalized_data
 
     def get_esr_exports_normalized(self, commodity_code: int, market_year: int) -> List[Dict[str, Any]]:
         """
         Get ESR export data with Country and Commodity names instead of just codes.
         Now includes countryDescription, gencCode, and regionName.
         """
-        self._ensure_esr_ref_data()
         data = self.get_esr_exports_all_countries(commodity_code, market_year)
-        
-        normalized_data = []
-        for record in data:
-            new_record = record.copy()
-            # Enrich with names
-            c_code = str(record.get('countryCode', ''))
-            com_code = str(record.get('commodityCode', ''))
-            unit_id = str(record.get('unitId', ''))
-            
-            if c_code in self._esr_countries_map:
-                country_data = self._esr_countries_map[c_code]
-                new_record['countryName'] = country_data.get('countryName')
-                new_record['countryDescription'] = country_data.get('countryDescription')
-                new_record['gencCode'] = country_data.get('gencCode')
-                
-                # Enrich Region Name using regionId from country data
-                region_id = str(country_data.get('regionId', ''))
-                if region_id in self._esr_regions_map:
-                    new_record['regionName'] = self._esr_regions_map[region_id]
-                else:
-                    new_record['regionName'] = None
+        return self._normalize_esr_records(data)
 
-            if com_code in self._esr_commodities_map:
-                new_record['commodityName'] = self._esr_commodities_map[com_code]
-            if unit_id in self._esr_units_map:
-                new_record['unitName'] = self._esr_units_map[unit_id]
-                
-            normalized_data.append(new_record)
-            
-        return normalized_data
+    def get_esr_exports_by_country_normalized(
+        self,
+        commodity_code: int,
+        country_code: int,
+        market_year: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get country-specific ESR export data with human-readable reference data attached.
+        """
+        data = self.get_esr_exports_by_country(commodity_code, country_code, market_year)
+        return self._normalize_esr_records(data)
+
+    def get_esr_exports_for_week_normalized(
+        self,
+        commodity_code: int,
+        week_ending_date: DateInput,
+        market_year: Optional[int] = None,
+        country_code: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get ESR export data for a single week ending date with reference data attached.
+        """
+        data = self.get_esr_exports_for_week(
+            commodity_code,
+            week_ending_date,
+            market_year=market_year,
+            country_code=country_code,
+        )
+        return self._normalize_esr_records(data)
+
+    def get_esr_latest_week_exports_normalized(
+        self,
+        commodity_code: int,
+        market_year: Optional[int] = None,
+        country_code: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get the latest weekly ESR export data with reference data attached.
+        """
+        data = self.get_esr_latest_week_exports(
+            commodity_code,
+            market_year=market_year,
+            country_code=country_code,
+        )
+        return self._normalize_esr_records(data)
 
     def get_psd_data_normalized(self, commodity_code: str, market_year: int) -> List[Dict[str, Any]]:
         """
@@ -102,24 +164,24 @@ class USDAFASEasyClient(ESRClient, GATSClient, PSDClient):
         """
         self._ensure_psd_ref_data()
         data = self.get_psd_commodity_data_by_year(commodity_code, market_year)
-        
+
         normalized_data = []
         for record in data:
             new_record = record.copy()
-            c_code = str(record.get('countryCode', ''))
-            com_code = str(record.get('commodityCode', ''))
-            unit_id = str(record.get('unitId', ''))
-            attr_id = str(record.get('attributeId', ''))
-            
+            c_code = str(record.get("countryCode", ""))
+            com_code = str(record.get("commodityCode", ""))
+            unit_id = str(record.get("unitId", ""))
+            attr_id = str(record.get("attributeId", ""))
+
             if c_code in self._psd_countries_map:
-                new_record['countryName'] = self._psd_countries_map[c_code]
+                new_record["countryName"] = self._psd_countries_map[c_code]
             if com_code in self._psd_commodities_map:
-                new_record['commodityName'] = self._psd_commodities_map[com_code]
+                new_record["commodityName"] = self._psd_commodities_map[com_code]
             if unit_id in self._psd_units_map:
-                new_record['unitName'] = self._psd_units_map[unit_id]
+                new_record["unitName"] = self._psd_units_map[unit_id]
             if attr_id in self._psd_attributes_map:
-                new_record['attributeName'] = self._psd_attributes_map[attr_id]
-            
+                new_record["attributeName"] = self._psd_attributes_map[attr_id]
+
             normalized_data.append(new_record)
-            
+
         return normalized_data
